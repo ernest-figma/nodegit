@@ -1,0 +1,190 @@
+on:
+  push:
+    branches:
+      - ernest/verify-release-packager
+
+name: Release packager proof
+
+permissions:
+  contents: read
+
+jobs:
+  linux-tests:
+    name: "Linux Tests"
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    defaults:
+      run:
+        working-directory: repo
+    env:
+      BUILD_ONLY: 'true'
+      RELEASE_PROOF_OUTPUT: ${{ runner.temp }}/release-proof
+    runs-on: ${{ matrix.os }}
+    container: ubuntu:20.04
+    steps:
+      - name: Install Dependencies for Ubuntu
+        working-directory: ${{ github.workspace }}
+        run: apt-get update && apt-get install -y git build-essential clang libssl-dev libkrb5-dev libc++-dev wget python3
+        env:
+          ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: proof
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          ref: 7d2f4d8f65e728b5f9fba6e5b55fd4155336b29d
+          path: repo
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        env:
+          ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+        with:
+          node-version: ${{ matrix.node }}
+          check-latest: true
+
+      - name: Setup Environment
+        run: |
+          mkdir ~/.ssh_tests
+          chmod 700 ~/.ssh_tests
+          printf "%b" "Host *\n\tStrictHostKeyChecking no\n" > ~/.ssh_tests/config
+          node -e "require('fs').writeFileSync(require('os').homedir() + '/.ssh_tests/id_rsa', Buffer.from(require('fs').readFileSync('test/id_rsa.enc', 'utf8'), 'base64'))"
+          cp test/id_rsa.pub ~/.ssh_tests/id_rsa.pub
+          chmod 600 ~/.ssh_tests/id_rsa*
+          git config --global user.name "John Doe"
+          git config --global user.email johndoe@example.com
+
+      - name: Install
+        env:
+          CC: clang
+          CXX: clang++
+          npm_config_clang: 1
+          GYP_DEFINES: use_obsolete_asm=true
+        # There is a race condition in node/generate that needs to be fixed
+        # Node 16 changed the logic it uses to select it's UID which means to make node run as root and not 1001, we need to chwon the current directory. More Details:
+        # https://stackoverflow.com/questions/70298238/getting-eaccess-when-running-npm-8-as-root
+        run: |
+          chown root.root -R .
+          npm set unsafe-perm true || true
+          node utils/retry npm install
+
+      - name: Test
+        run: |
+          set -e
+          eval `ssh-agent -s`
+          ssh-add ~/.ssh_tests/id_rsa
+          node utils/retry npm test
+
+      - name: Install negative control
+        run: |
+          mkdir -p "$RUNNER_TEMP/old-packager"
+          node -e 'require("fs").writeFileSync(process.env.RUNNER_TEMP + "/old-packager/package.json", JSON.stringify({private:true, dependencies:{"@mapbox/node-pre-gyp":"2.0.3"}, overrides:{tar:"7.5.23"}}))'
+          npm install --prefix "$RUNNER_TEMP/old-packager" --ignore-scripts --no-audit --no-fund
+
+      - name: Prove package and mock publish
+        run: node ../proof/.github/scripts/release-proof.cjs "$PWD" "$RUNNER_TEMP/old-packager"
+
+      - name: Save proof reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-proof-${{ runner.os }}-${{ runner.arch }}-node${{ matrix.node }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/release-proof/*.json
+            ${{ runner.temp }}/release-proof/*.jsonl
+            ${{ runner.temp }}/release-proof/*.log
+            ${{ runner.temp }}/release-proof/*.sh
+
+  macos-tests:
+    name: "macOS Tests"
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]
+        os: [macos-15, macos-15-intel]
+    defaults:
+      run:
+        working-directory: repo
+    env:
+      BUILD_ONLY: 'true'
+      RELEASE_PROOF_OUTPUT: ${{ runner.temp }}/release-proof
+    runs-on: ${{ matrix.os }}
+  # This is mostly the same as the Linux steps, waiting for anchor support
+  # https://github.com/actions/runner/issues/1182
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: proof
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          ref: 7d2f4d8f65e728b5f9fba6e5b55fd4155336b29d
+          path: repo
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        env:
+          ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+        with:
+          node-version: ${{ matrix.node }}
+          check-latest: true
+
+      - name: Setup Environment
+        run: |
+          mkdir ~/.ssh_tests
+          chmod 700 ~/.ssh_tests
+          printf "%b" "Host *\n\tStrictHostKeyChecking no\n" > ~/.ssh_tests/config
+          node -e "require('fs').writeFileSync(require('os').homedir() + '/.ssh_tests/id_rsa', Buffer.from(require('fs').readFileSync('test/id_rsa.enc', 'utf8'), 'base64'))"
+          cp test/id_rsa.pub ~/.ssh_tests/id_rsa.pub
+          chmod 600 ~/.ssh_tests/id_rsa*
+          git config --global user.name "John Doe"
+          git config --global user.email johndoe@example.com
+
+      - name: Install
+        env:
+          CC: clang
+          CXX: clang++
+          npm_config_clang: 1
+          GYP_DEFINES: use_obsolete_asm=true
+        # There is a race condition in node/generate that needs to be fixed
+        run: node utils/retry npm install
+
+      - name: Test
+        run: |
+          set -e
+          eval `ssh-agent -s`
+          ssh-add ~/.ssh_tests/id_rsa
+          node utils/retry npm test
+
+      - name: Install negative control
+        run: |
+          mkdir -p "$RUNNER_TEMP/old-packager"
+          node -e 'require("fs").writeFileSync(process.env.RUNNER_TEMP + "/old-packager/package.json", JSON.stringify({private:true, dependencies:{"@mapbox/node-pre-gyp":"2.0.3"}, overrides:{tar:"7.5.23"}}))'
+          npm install --prefix "$RUNNER_TEMP/old-packager" --ignore-scripts --no-audit --no-fund
+
+      - name: Prove package and mock publish
+        run: node ../proof/.github/scripts/release-proof.cjs "$PWD" "$RUNNER_TEMP/old-packager"
+
+      - name: Save proof reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-proof-${{ runner.os }}-${{ runner.arch }}-node${{ matrix.node }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/release-proof/*.json
+            ${{ runner.temp }}/release-proof/*.jsonl
+            ${{ runner.temp }}/release-proof/*.log
+            ${{ runner.temp }}/release-proof/*.sh
