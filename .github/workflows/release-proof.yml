@@ -21,7 +21,6 @@ jobs:
         working-directory: repo
     env:
       BUILD_ONLY: 'true'
-      RELEASE_PROOF_OUTPUT: ${{ runner.temp }}/release-proof
     runs-on: ${{ matrix.os }}
     container: ubuntu:20.04
     steps:
@@ -116,7 +115,6 @@ jobs:
         working-directory: repo
     env:
       BUILD_ONLY: 'true'
-      RELEASE_PROOF_OUTPUT: ${{ runner.temp }}/release-proof
     runs-on: ${{ matrix.os }}
   # This is mostly the same as the Linux steps, waiting for anchor support
   # https://github.com/actions/runner/issues/1182
